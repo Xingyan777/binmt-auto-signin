@@ -51,9 +51,22 @@ function request(url, cookieStr, opts = {}) {
         resolve({ status: res.statusCode, body: buf.toString(), setCookie, headers: res.headers });
       });
     });
-    reqObj.setTimeout(30000, () => reqObj.destroy(new Error('timeout')));
+    reqObj.setTimeout(60000, () => reqObj.destroy(new Error('timeout')));
     reqObj.on('error', reject);
   });
+}
+
+// ---------- 带重试的请求（海外 runner 访问国内论坛网络波动大） ----------
+async function requestWithRetry(url, cookieStr, opts = {}, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await request(url, cookieStr, opts);
+    } catch (e) {
+      if (i === retries - 1) throw e;
+      console.log(`⚠️ 请求失败(${e.message})，第 ${i + 1} 次重试...`);
+      await new Promise(r => setTimeout(r, 3000 * (i + 1)));
+    }
+  }
 }
 
 // ---------- 合并 cookie ----------
@@ -108,11 +121,11 @@ function solveAcwChallenge(html) {
   return null;
 }
 
-// ---------- 获取页面（自动处理 WAF 挑战） ----------
+// ---------- 获取页面（自动处理 WAF 挑战 + 重试） ----------
 async function getWithWaf(url, cookie) {
   let c = cookie;
   for (let i = 0; i < 3; i++) {
-    const r = await request(url, c);
+    const r = await requestWithRetry(url, c);
     if (r.body.includes('acw_sc__v2') && /<script>[\s\S]*arg1\s*=/.test(r.body)) {
       const acw = solveAcwChallenge(r.body);
       if (acw) {
