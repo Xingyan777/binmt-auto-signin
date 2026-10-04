@@ -1,0 +1,6 @@
+# 敏感文件永不提交
+*.cookie
+cookie*
+*.secret
+.env
+/config*.json
