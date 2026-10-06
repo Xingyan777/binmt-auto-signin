@@ -47,7 +47,9 @@ function request(url, cookieStr, opts = {}) {
     }, opts.headers || {});
     if (cookieStr) headers['Cookie'] = cookieStr;
     const t0 = Date.now();
-    const reqObj = mod.get(u, { headers }, res => {
+    // family:4 强制走 IPv4 —— bbs.binmt.cc 的 IPv6 链路不通（会挂起到超时），
+    // GitHub runner 有 IPv6 地址，若不强制 IPv4 会偶发连接被丢弃导致快速 timeout
+    const reqObj = mod.get(u, { headers, family: 4 }, res => {
       const chunks = [];
       res.on('data', c => chunks.push(c));
       res.on('end', () => {
