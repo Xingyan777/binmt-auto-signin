@@ -8,11 +8,13 @@
  *  2. 动态获取 formhash
  *  3. 调用 k_misign 插件签到接口
  *
+ * 容错：
+ *  - 单次请求超时 120s + 连接超时 30s
+ *  - 单次请求自动重试 4 次
+ *  - 整个签到流程整体重试最多 4 轮（应对海外 runner 到国内站网络波动）
+ *
  * 配置（环境变量）：
  *  BBS_COOKIE  - 论坛登录后的 Cookie（含 auth/saltkey），必填
- *
- * 用法：
- *  直接运行: BBS_COOKIE="..." node sign.js
  */
 
 const https = require('https');
@@ -22,7 +24,14 @@ const zlib = require('zlib');
 const BASE = 'https://bbs.binmt.cc';
 const UA = 'Mozilla/5.0 (Linux; Android 11; SM-G975F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36';
 
-// ---------- HTTP 请求封装（自动处理 gzip） ----------
+const REQ_TIMEOUT = 120000;
+const CONNECT_TIMEOUT = 30000;
+const REQ_RETRIES = 4;
+const FLOW_ATTEMPTS = 4;
+const FLOW_DELAYS = [30000, 60000, 120000];
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
 function request(url, cookieStr, opts = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(url, BASE);
@@ -34,8 +43,10 @@ function request(url, cookieStr, opts = {}) {
       'Accept-Encoding': 'gzip, deflate, br',
       'Accept-Language': 'zh-CN,zh;q=0.9',
       'Referer': BASE + '/',
+      'Connection': 'close',
     }, opts.headers || {});
     if (cookieStr) headers['Cookie'] = cookieStr;
+    const t0 = Date.now();
     const reqObj = mod.get(u, { headers }, res => {
       const chunks = [];
       res.on('data', c => chunks.push(c));
@@ -48,28 +59,33 @@ function request(url, cookieStr, opts = {}) {
           else if (enc.includes('br')) buf = zlib.brotliDecompressSync(buf);
         } catch (e) { /* 保留原文 */ }
         const setCookie = (res.headers['set-cookie'] || []).join('; ');
-        resolve({ status: res.statusCode, body: buf.toString(), setCookie, headers: res.headers });
+        resolve({
+          status: res.statusCode,
+          body: buf.toString(),
+          setCookie,
+          headers: res.headers,
+          ms: Date.now() - t0,
+        });
       });
     });
-    reqObj.setTimeout(60000, () => reqObj.destroy(new Error('timeout')));
-    reqObj.on('error', reject);
+    reqObj.setTimeout(REQ_TIMEOUT, () => reqObj.destroy(new Error('timeout')));
+    reqObj.on('socket', s => { s.setTimeout(CONNECT_TIMEOUT, () => reqObj.destroy(new Error('connect_timeout'))); });
+    reqObj.on('error', err => { err.reqMs = Date.now() - t0; reject(err); });
   });
 }
 
-// ---------- 带重试的请求（海外 runner 访问国内论坛网络波动大） ----------
-async function requestWithRetry(url, cookieStr, opts = {}, retries = 3) {
+async function requestWithRetry(url, cookieStr, opts = {}, retries = REQ_RETRIES) {
   for (let i = 0; i < retries; i++) {
     try {
       return await request(url, cookieStr, opts);
     } catch (e) {
       if (i === retries - 1) throw e;
-      console.log(`⚠️ 请求失败(${e.message})，第 ${i + 1} 次重试...`);
-      await new Promise(r => setTimeout(r, 3000 * (i + 1)));
+      console.log(`⚠️ 请求失败(${e.message} code=${e.code || '-'} ${e.reqMs || '?'}ms)，第 ${i + 1} 次重试...`);
+      await sleep(5000);
     }
   }
 }
 
-// ---------- 合并 cookie ----------
 function mergeCookies(...cookStrs) {
   const map = new Map();
   for (const cs of cookStrs) {
@@ -89,17 +105,13 @@ function mergeCookies(...cookStrs) {
   return out.join('; ');
 }
 
-// ---------- 解决阿里云 WAF acw_sc__v2 JS 挑战 ----------
 function solveAcwChallenge(html) {
-  // 提取 <script>...</script> 中的 JS
   const m = html.match(/<script>([\s\S]*?)<\/script>/);
   if (!m) return null;
   const js = m[1];
-  // 提取 arg1 值（WAF 把关键数据放在 var arg1='...'）
   const arg1m = js.match(/arg1\s*=\s*'([0-9A-Fa-f]+)'/);
   if (!arg1m) return null;
   const arg1 = arg1m[1];
-
   let cookieVal = '';
   const sandbox = {
     document: {},
@@ -116,12 +128,11 @@ function solveAcwChallenge(html) {
   try {
     vm.createContext(sandbox);
     vm.runInContext(js, sandbox, { timeout: 5000 });
-  } catch (e) { /* 忽略运行时对 reload 等报错 */ }
+  } catch (e) { /* 忽略 */ }
   if (cookieVal.includes('acw_sc__v2')) return cookieVal;
   return null;
 }
 
-// ---------- 获取页面（自动处理 WAF 挑战 + 重试） ----------
 async function getWithWaf(url, cookie) {
   let c = cookie;
   for (let i = 0; i < 3; i++) {
@@ -130,7 +141,7 @@ async function getWithWaf(url, cookie) {
       const acw = solveAcwChallenge(r.body);
       if (acw) {
         c = mergeCookies(c, acw, r.setCookie);
-        continue; // 重试
+        continue;
       }
     }
     return { res: r, cookie: mergeCookies(c, r.setCookie) };
@@ -138,62 +149,88 @@ async function getWithWaf(url, cookie) {
   return null;
 }
 
-// ---------- 主流程 ----------
-async function main() {
-  let cookie = process.env.BBS_COOKIE;
-  if (!cookie) {
-    console.log('❌ 缺少环境变量 BBS_COOKIE');
-    process.exit(1);
-  }
-  // 清理：去除尾部残留的 %09/%20/分号/空白，避免干扰 Cookie 解析
-  cookie = cookie.replace(/[;%\s]+$/, '').trim();
-
-  // 1. 获取签到页，动态解析 formhash
-  const signUrl = BASE + '/k_misign-sign.html';
-  const sf = await getWithWaf(signUrl, cookie);
-  if (!sf) { console.log('❌ 多次请求仍被 WAF 拦截'); process.exit(1); }
-  const html = sf.res.body;
-  const cookieWithWaf = sf.cookie;
-
-  // 判断登录态
-  if (html.includes('member.php?mod=logging') && !html.includes('qmtd')) {
-    // 检查是否登录（签到页未登录会跳转登录）
-  }
-
-  const fh = html.match(/formhash=([a-f0-9]{8})/);
-  if (!fh) {
-    console.log('❌ 未能获取 formhash，cookie 可能已失效，请更新 BBS_COOKIE');
-    process.exit(1);
-  }
-  const formhash = fh[1];
-  console.log('✅ formhash =', formhash);
-
-  // 2. 调用签到接口
-  const qdUrl = `${BASE}/plugin.php?id=k_misign:sign&operation=qiandao&format=text&formhash=${formhash}`;
-  const qd = await getWithWaf(qdUrl, cookieWithWaf);
-  if (!qd) { console.log('❌ 签到请求失败（被 WAF 拦截）'); process.exit(1); }
-  const respBody = qd.res.body;
-  // 从 XML/CDATA 中提取纯文本
+function parseResult(respBody) {
   const clean = respBody
     .replace(/^<\?xml[\s\S]*?<root><!\[CDATA\[/, '')
     .replace(/\]\]><\/root>[\s\S]*$/, '')
     .replace(/^<\/?root>/, '')
     .trim();
   const text = clean || respBody.replace(/<[^>]+>/g, '').trim();
+  if (/已签到|今日已签|今日已签到/.test(respBody)) return { kind: 'already', text };
+  if (/签到成功|成功.*获取|签到.*成功/.test(respBody)) return { kind: 'success', text };
+  if (respBody.includes('登录') && !respBody.includes('今日')) return { kind: 'expired', text };
+  return { kind: 'unknown', text };
+}
 
-  if (/已签到|今日已签|今日已签到/.test(respBody)) {
-    console.log('📅 今日已签到过: ' + text);
-  } else if (/签到成功|成功.*获取|签到.*成功/.test(respBody)) {
-    console.log('✅ ' + text);
-  } else if (respBody.includes('登录') && !respBody.includes('今日')) {
-    console.log('❌ Cookie 已失效，请更新 BBS_COOKIE');
-    process.exit(1);
-  } else {
-    console.log('ℹ️ 签到返回: ' + text);
+async function attemptSign(cookie) {
+  const signUrl = BASE + '/k_misign-sign.html';
+  const sf = await getWithWaf(signUrl, cookie);
+  if (!sf) return { ok: false, msg: '多次请求仍被 WAF 拦截' };
+  const html = sf.res.body;
+  const cookieWithWaf = sf.cookie;
+  console.log(`签到页: HTTP ${sf.res.status} ${sf.res.ms}ms, ${html.length}B`);
+
+  const fh = html.match(/formhash=([a-f0-9]{8})/);
+  if (!fh) return { ok: false, msg: '未能获取 formhash（cookie 可能已失效）' };
+  const formhash = fh[1];
+  console.log('✅ formhash =', formhash);
+
+  const qdUrl = `${BASE}/plugin.php?id=k_misign:sign&operation=qiandao&format=text&formhash=${formhash}`;
+  const qd = await getWithWaf(qdUrl, cookieWithWaf);
+  if (!qd) return { ok: false, msg: '签到请求被 WAF 拦截' };
+  console.log(`签到接口: HTTP ${qd.res.status} ${qd.res.ms}ms`);
+
+  const respBody = qd.res.body;
+  const result = parseResult(respBody);
+
+  if (result.kind === 'already') {
+    console.log('📅 今日已签到过: ' + result.text);
+    return { ok: true, text: result.text };
   }
+  if (result.kind === 'success') {
+    console.log('✅ ' + result.text);
+    return { ok: true, text: result.text };
+  }
+  if (result.kind === 'expired') {
+    console.log('❌ Cookie 已失效，请更新 BBS_COOKIE');
+    return { ok: false, fatal: true, msg: 'Cookie 已失效', text: result.text };
+  }
+  console.log('ℹ️ 签到返回: ' + result.text);
+  return { ok: true, text: result.text };
+}
 
-  // 3. 输出关键信息（供 GitHub Actions 通知）
-  console.log('RESULT_BODY=' + JSON.stringify(text));
+async function main() {
+  let cookie = process.env.BBS_COOKIE;
+  if (!cookie) {
+    console.log('❌ 缺少环境变量 BBS_COOKIE');
+    process.exit(1);
+  }
+  cookie = cookie.replace(/[;%\s]+$/, '').trim();
+
+  for (let attempt = 1; attempt <= FLOW_ATTEMPTS; attempt++) {
+    if (attempt > 1) {
+      const delay = FLOW_DELAYS[attempt - 2] || 120000;
+      console.log(`\n🔄 整体第 ${attempt} 轮尝试（等待 ${delay / 1000}s 后开始）...`);
+      await sleep(delay);
+    }
+    try {
+      const r = await attemptSign(cookie);
+      if (r.ok) {
+        console.log('✅ 签到流程成功.');
+        console.log('RESULT_BODY=' + JSON.stringify(r.text));
+        process.exit(0);
+      }
+      if (r.fatal) {
+        console.log('❌ ' + r.msg);
+        process.exit(1);
+      }
+      console.log('⚠️ 本轮未完成: ' + r.msg);
+    } catch (e) {
+      console.log(`⚠️ 本轮异常: ${e.message} code=${e.code || '-'}`);
+    }
+  }
+  console.log('❌ 多次尝试均失败，签到未完成');
+  process.exit(1);
 }
 
 main().catch(e => { console.error('❌ 出错:', e.message); process.exit(1); });
