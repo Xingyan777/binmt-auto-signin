@@ -71,7 +71,6 @@ function request(url, cookieStr, opts = {}) {
       });
     });
     reqObj.setTimeout(REQ_TIMEOUT, () => reqObj.destroy(new Error('timeout')));
-    reqObj.on('socket', s => { s.setTimeout(CONNECT_TIMEOUT, () => reqObj.destroy(new Error('connect_timeout'))); });
     reqObj.on('error', err => { err.reqMs = Date.now() - t0; reject(err); });
   });
 }
