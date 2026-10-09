@@ -209,6 +209,33 @@ async function main() {
   }
   cookie = cookie.replace(/[;%\s]+$/, '').trim();
 
+  // 随机延迟：仅 schedule 触发时生效，workflow_dispatch（手动）跳过
+  // GitHub Actions 的 GITHUB_EVENT_NAME 区分触发来源
+  const eventName = process.env.GITHUB_EVENT_NAME || '';
+  if (eventName === 'schedule') {
+    const MAX_DELAY = 4 * 60 * 60 * 1000; // 4 小时
+    const delay = Math.floor(Math.random() * MAX_DELAY);
+    const delayMin = Math.round(delay / 60000);
+    console.log(`🎲 随机延迟 ${delayMin} 分钟（${(delay / 1000).toFixed(0)}s）后开始签到...`);
+    console.log(`   预计签到时间：约 ${new Date(Date.now() + delay).toISOString()}`);
+
+    // 分段 sleep，每 10 分钟输出一次心跳（GitHub Actions 6h 超时，4h 安全）
+    const HEARTBEAT = 10 * 60 * 1000;
+    let remaining = delay;
+    while (remaining > 0) {
+      const step = Math.min(remaining, HEARTBEAT);
+      await sleep(step);
+      remaining -= step;
+      if (remaining > 0) {
+        const leftMin = Math.round(remaining / 60000);
+        console.log(`⏳ 剩余 ${leftMin} 分钟...`);
+      }
+    }
+    console.log('⏰ 延迟结束，开始签到！');
+  } else {
+    console.log('🚀 手动触发，跳过随机延迟');
+  }
+
   for (let attempt = 1; attempt <= FLOW_ATTEMPTS; attempt++) {
     if (attempt > 1) {
       const delay = FLOW_DELAYS[attempt - 2] || 120000;

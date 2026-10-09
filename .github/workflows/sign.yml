@@ -2,12 +2,8 @@ name: BBS Auto Sign-In
 
 on:
   schedule:
-    # 每天多次执行（北京时间 16:00 / 18:00 / 20:00 / 22:00）
-    # 脚本对"今日已签"同样返回成功，多次触发无副作用，提高成功率
-    - cron: '0 8 * * *'
-    - cron: '0 10 * * *'
-    - cron: '0 12 * * *'
-    - cron: '0 14 * * *'
+    # 北京时间 12:00 触发一次，脚本内随机延迟 0~4 小时后再签到
+    - cron: '0 4 * * *'
   workflow_dispatch:   # 支持手动触发
 
 jobs:
@@ -23,4 +19,5 @@ jobs:
       - name: Run sign script
         env:
           BBS_COOKIE: ${{ secrets.BBS_COOKIE }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: node sign.js
