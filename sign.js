@@ -9,7 +9,8 @@
  *  3. 调用 k_misign 插件签到接口
  *
  * 容错：
- *  - 单次请求超时 120s + 连接超时 30s
+ *  - 强制 IPv4（论坛 IPv6 链路不通，避免偶发快速超时）
+ *  - 单次请求超时 120s
  *  - 单次请求自动重试 4 次
  *  - 整个签到流程整体重试最多 4 轮（应对海外 runner 到国内站网络波动）
  *
@@ -25,7 +26,6 @@ const BASE = 'https://bbs.binmt.cc';
 const UA = 'Mozilla/5.0 (Linux; Android 11; SM-G975F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36';
 
 const REQ_TIMEOUT = 120000;
-const CONNECT_TIMEOUT = 30000;
 const REQ_RETRIES = 4;
 const FLOW_ATTEMPTS = 4;
 const FLOW_DELAYS = [30000, 60000, 120000];
