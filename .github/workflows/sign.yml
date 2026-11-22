@@ -2,16 +2,24 @@ name: BBS Auto Sign-In
 
 on:
   schedule:
-    # 北京时间 12:00 触发一次，脚本内随机延迟 0~4 小时后再签到
-    - cron: '0 4 * * *'
+    # 每天 6 次触发（UTC），对应北京时间 08:00 / 11:00 / 14:00 / 17:00 / 20:00 / 23:00
+    # 目的：用触发次数覆盖不同时段的跨境链路质量；
+    #       配合脚本内 ±20 分钟随机抖动，避开整点被 WAF 批量标记。
+    - cron: '0 0,3,6,9,12,15 * * *'
   workflow_dispatch:   # 支持手动触发
+
+# 同一时间只允许一个签到 run，避免并发抢同一 cookie 触发风控
+concurrency:
+  group: bbs-signin
+  cancel-in-progress: false
 
 jobs:
   sign:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -19,5 +27,9 @@ jobs:
       - name: Run sign script
         env:
           BBS_COOKIE: ${{ secrets.BBS_COOKIE }}
+          BBS_PROXY: ${{ secrets.BBS_PROXY }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
+          # 一天 6 次，每次只做小抖动（0.34h ≈ 20min），
+          # 否则延迟会跨过下一次触发，等于白跑
+          BBS_MAX_DELAY_H: '0.34'
         run: node sign.js
