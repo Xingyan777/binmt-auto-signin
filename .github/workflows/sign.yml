@@ -2,16 +2,25 @@ name: BBS Auto Sign-In
 
 on:
   schedule:
-    # 每天 6 次触发（UTC），对应北京时间 08:00 / 11:00 / 14:00 / 17:00 / 20:00 / 23:00
-    # 目的：用触发次数覆盖不同时段的跨境链路质量；
-    #       配合脚本内 ±20 分钟随机抖动，避开整点被 WAF 批量标记。
-    - cron: '0 0,3,6,9,12,15 * * *'
+    # 关键约束：GitHub schedule 是 best-effort，密集调度会被丢弃。
+    # 实测 '0 0,3,6,9,12,15' 每天只跑 2 次（中间 4 个点被丢）。
+    # 对策：把 6 个点摊到更散的位置 + 每个点用 4 小时跨度去抢，
+    #       并保留外部触发（scripts/trigger.sh + Termux cron）做兜底。
+    #
+    # 6 个 UTC 点 = 北京时间 08 / 11 / 14 / 17 / 20 / 23 点
+    - cron: '7 0 * * *'
+    - cron: '23 3 * * *'
+    - cron: '41 6 * * *'
+    - cron: '13 9 * * *'
+    - cron: '37 12 * * *'
+    - cron: '51 15 * * *'
+    # 兜底：22 点 UTC（北京 06:00）补一次，覆盖前面全丢的极端情况
+    - cron: '19 22 * * *'
   workflow_dispatch:   # 支持手动触发
 
-# 同一时间只允许一个签到 run，避免并发抢同一 cookie 触发风控
-concurrency:
-  group: bbs-signin
-  cancel-in-progress: false
+# 注意：不加 concurrency。
+# 之前加 group: bbs-signin + cancel-in-progress: false 导致排队超时被 cancelled（run #71）。
+# 签到本身幂等（重复执行只会返回「今日已签」），并发无害，宁可多跑不可被取消。
 
 jobs:
   sign:
@@ -29,7 +38,6 @@ jobs:
           BBS_COOKIE: ${{ secrets.BBS_COOKIE }}
           BBS_PROXY: ${{ secrets.BBS_PROXY }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
-          # 一天 6 次，每次只做小抖动（0.34h ≈ 20min），
-          # 否则延迟会跨过下一次触发，等于白跑
+          # 抖动上限 0.34h ≈ 20min，避免跨过下一次触发
           BBS_MAX_DELAY_H: '0.34'
         run: node sign.js
